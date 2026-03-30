@@ -1,6 +1,12 @@
 import { writeFileAndCommit, pushToRemote, pullLatest } from '../git/operations';
 import type { SessionPayload } from '../auth/session';
 
+export interface DocWriteMeta {
+	title?: string;
+	createdAt?: string;
+	updatedAt?: string;
+}
+
 /** Create or update a document */
 export async function writeDoc(
 	cacheDir: string,
@@ -9,15 +15,16 @@ export async function writeDoc(
 	content: string,
 	author: SessionPayload,
 	token: string,
+	meta?: DocWriteMeta,
 ): Promise<string> {
 	await pullLatest(cacheDir, token);
 
 	const now = new Date().toISOString();
 	const frontmatter = [
 		'---',
-		`title: ${doc}`,
+		`title: ${meta?.title || doc}`,
 		`author: ${author.userId}`,
-		`createdAt: ${now}`,
+		`createdAt: ${meta?.createdAt || now}`,
 		`updatedAt: ${now}`,
 		'---',
 		'',
