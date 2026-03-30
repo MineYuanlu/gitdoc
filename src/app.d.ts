@@ -3,7 +3,16 @@
 declare global {
 	namespace App {
 		// interface Error {}
-		// interface Locals {}
+		interface Locals {
+			user?: {
+				userId: string; // "github:12345"
+				provider: 'github';
+				username: string;
+				avatar: string;
+				permissions: string[];
+				ghToken: string;
+			};
+		}
 		// interface PageData {}
 		// interface PageState {}
 		// interface Platform {}

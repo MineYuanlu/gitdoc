@@ -96,9 +96,9 @@ GitDoc 是一个基于 Git + Markdown 的团队文档管理工具。服务器本
 		{
 			"key": "sk-xxxx",
 			"name": "CI Bot",
-			"permissions": ["read", "comment"]
-		}
-	]
+			"permissions": ["read", "comment"],
+		},
+	],
 }
 ```
 
@@ -110,7 +110,7 @@ GitDoc 是一个基于 Git + Markdown 的团队文档管理工具。服务器本
 	"avatar": "https://...", // 头像 URL
 	"permissions": ["read", "write", "comment", "admin"], // 权限列表
 	"invitedBy": "github:12345", // 邀请人
-	"createdAt": "2025-01-01T00:00:00Z"
+	"createdAt": "2025-01-01T00:00:00Z",
 }
 ```
 
@@ -251,7 +251,7 @@ async function writeFileAndCommit(
 	filepath: string,
 	content: string,
 	author: { name: string; email: string },
-	message: string
+	message: string,
 ): Promise<string>;
 
 /** 推送到远程仓库 */
@@ -290,9 +290,7 @@ function getAuthUrl(state: string): string;
 async function exchangeCode(code: string): Promise<string>;
 
 /** 用 access token 获取 GitHub 用户信息 */
-async function getGitHubUser(
-	token: string
-): Promise<{ id: number; login: string; avatar_url: string }>;
+async function getGitHubUser(token: string): Promise<{ id: number; login: string; avatar_url: string }>;
 ```
 
 ### 5.4 auth/session.ts — JWT Session
@@ -321,11 +319,7 @@ function destroySession(cookies: Cookies): void;
 
 ```typescript
 /** 从仓库中读取用户权限信息 */
-async function getUserPermissions(
-	cacheDir: string,
-	provider: string,
-	userId: string
-): Promise<UserInfo | null>;
+async function getUserPermissions(cacheDir: string, provider: string, userId: string): Promise<UserInfo | null>;
 
 /** 检查用户是否具有指定权限 */
 function hasPermission(user: SessionPayload, required: string): boolean;
@@ -357,7 +351,7 @@ async function writeDoc(
 	doc: string,
 	content: string,
 	author: SessionPayload,
-	token: string
+	token: string,
 ): Promise<string>; // commit SHA
 
 /** 添加评论 */
@@ -368,7 +362,7 @@ async function addComment(
 	content: string,
 	author: SessionPayload,
 	token: string,
-	replyTo?: string
+	replyTo?: string,
 ): Promise<string>; // commit SHA
 ```
 
