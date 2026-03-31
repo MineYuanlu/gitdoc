@@ -2,7 +2,7 @@
 
 ## 1. 系统概览
 
-GitDoc 是一个基于 Git + Markdown 的团队文档管理工具。服务器本身无状态、无持久数据，所有文档、评论、用户信息均存储在用户指定的 Git 仓库中。
+GitDoc 是一个基于 Git + Markdown 的团队文档管理工具。服务器本身是一个"仓库解析器"——不持久化用户数据，所有文档和评论均存储在用户指定的 Git 仓库中。用户首次使用时提供 Git 仓库地址（私有仓库需先登录 GitHub 获取 token），之后所有 Git 操作均通过用户的 GitHub token 进行，服务器不维护独立的权限系统。
 
 ### 架构图
 
@@ -41,8 +41,10 @@ GitDoc 是一个基于 Git + Markdown 的团队文档管理工具。服务器本
 ### 核心设计原则
 
 - **Git 即数据库**：所有数据存储在 Git 仓库中，每次编辑/评论对应一次 commit
+- **仓库解析器**：服务器不维护用户系统，权限完全依赖用户对 Git 仓库的实际权限（read → 浏览文档，write → 编辑/评论）
+- **Token 驱动**：所有 Git 操作通过用户的 GitHub token 执行，服务器仅做缓存和解析
 - **无状态服务器**：服务器不持久化任何数据，可水平扩展，支持 Node.js 和 Vercel 部署
-- **本地缓存加速**：通过缓存 clone 的仓库减少网络请求，提高响应速度
+- **本地缓存加速**：通过缓存 clone 的仓库减少网络请求，使用缓存前先校验用户对仓库的访问权限
 
 ---
 
@@ -72,17 +74,16 @@ GitDoc 是一个基于 Git + Markdown 的团队文档管理工具。服务器本
 ```
 /
 ├── config.json                                      # 站点配置
-├── auth/
-│   └── [provider]/                                  # 如 github
-│       └── [user_id]/
-│           └── info.json                            # 用户信息
 └── doc/
-    └── [section]/                                   # 章节
-        └── [doc_name]/                              # 文档
-            ├── page.md                              # 文档正文
-            ├── comment-{timestamp}-{userId}.md      # 评论
+    └── [...path]/                                   # 任意嵌套路径
+        ├── page.md                                  # 文档正文（有此文件即为文档页面）
+        └── .comment/                                # 评论目录
+            ├── {timestamp}-{nanoid}.md              # 评论文件
             └── ...
 ```
+
+> 一个路径可以同时作为文档页面（含 `page.md`）和文件夹（含子目录），两者互不干扰。
+> 例如：`doc/guide/page.md` 是"guide"的文档页面，同时 `doc/guide/setup/page.md` 是其子文档。
 
 ### 3.1 config.json
 
@@ -90,38 +91,12 @@ GitDoc 是一个基于 Git + Markdown 的团队文档管理工具。服务器本
 {
 	"title": "团队文档", // 站点标题
 	"description": "项目文档中心", // 站点描述
-	"defaultPermissions": ["read"], // 新用户默认权限
-	"apiKeys": [
-		// API 访问密钥（供 LLM/Agent 使用）
-		{
-			"key": "sk-xxxx",
-			"name": "CI Bot",
-			"permissions": ["read", "comment"],
-		},
-	],
 }
 ```
 
-### 3.2 auth/[provider]/[user_id]/info.json
+### 3.2 page.md（文档正文）
 
-```jsonc
-{
-	"username": "zhangsan", // 显示名称
-	"avatar": "https://...", // 头像 URL
-	"permissions": ["read", "write", "comment", "admin"], // 权限列表
-	"invitedBy": "github:12345", // 邀请人
-	"createdAt": "2025-01-01T00:00:00Z",
-}
-```
-
-权限说明：
-
-- `read` — 浏览文档
-- `write` — 编辑文档
-- `comment` — 发表评论
-- `admin` — 管理用户、修改配置
-
-### 3.3 page.md（文档正文）
+路径：`doc/[...path]/page.md`
 
 ```markdown
 ---
@@ -134,19 +109,29 @@ updatedAt: 2025-06-15T10:30:00Z
 文档正文内容（Markdown 格式）...
 ```
 
-### 3.4 comment-{timestamp}-{userId}.md（评论）
+### 3.3 .comment/{timestamp}-{nanoid}.md（评论）
+
+路径：`doc/[...path]/.comment/{timestamp}-{nanoid}.md`
+
+评论存储在文档同级的 `.comment/` 目录下，使用 `{Unix毫秒时间戳}-{nanoid}.md` 命名，确保唯一性和时间排序。
 
 ```markdown
 ---
 author: github:67890
 createdAt: 2025-06-15T11:00:00Z
-replyTo: comment-1718438400000-12345 # 可选，回复某条评论
+replyTo: 1718438400000-abc123 # 可选，回复某条评论的文件名（不含 .md）
+line: 15 # 可选，附属行号（用于行评论，在右侧侧边栏显示）
 ---
 
 评论内容...
 ```
 
-文件名格式：`comment-{Unix毫秒时间戳}-{userId}.md`，确保唯一性和时间排序。
+Frontmatter 字段说明：
+
+- `author` — 评论者的 GitHub 用户标识
+- `createdAt` — 评论创建时间
+- `replyTo` — （可选）回复目标评论的文件名（不含 `.md` 后缀）
+- `line` — （可选）关联的文档行号，用于行级评论。行评论会在文档查看页的右侧侧边栏中对应行旁显示
 
 ---
 
@@ -171,37 +156,28 @@ src/routes/
 │
 ├── doc/
 │   ├── +layout.svelte                      # 文档布局：侧边栏目录树
-│   ├── +layout.server.ts                   # 加载章节列表
+│   ├── +layout.server.ts                   # 加载文档目录结构
 │   ├── +page.svelte                        # 文档总览
-│   ├── [section]/
-│   │   ├── +page.svelte                    # 章节内文档列表
-│   │   ├── +page.server.ts                 # 加载该章节的文档列表
-│   │   └── [doc]/
-│   │       ├── +page.svelte                # 查看文档 + 评论列表
-│   │       ├── +page.server.ts             # 加载 page.md + 评论
-│   │       ├── edit/
-│   │       │   ├── +page.svelte            # Markdown 编辑器
-│   │       │   └── +page.server.ts         # 加载内容 / POST 保存编辑
-│   │       └── comment/
-│   │           └── +server.ts              # POST → 提交评论
+│   └── [...path]/
+│       ├── +page.svelte                    # 查看文档 + 评论列表（含行评论侧边栏）
+│       ├── +page.server.ts                 # 加载 page.md + 评论 + 子目录列表
+│       ├── edit/
+│       │   ├── +page.svelte                # Markdown 编辑器
+│       │   └── +page.server.ts             # 加载内容 / POST 保存编辑
+│       └── comment/
+│           └── +server.ts                  # POST → 提交评论（支持行评论）
 │
 ├── search/
 │   ├── +page.svelte                        # 搜索页面
 │   └── +page.server.ts                     # 搜索处理（?q=关键词）
 │
-├── admin/
-│   ├── +page.svelte                        # 管理面板：用户列表
-│   ├── +page.server.ts                     # 加载用户列表
-│   └── users/+server.ts                    # POST 邀请 / DELETE 移除用户
-│
-└── api/v1/                                 # LLM/Agent REST API
+└── api/v1/                                 # LLM/Agent REST API（仅 token 认证）
     ├── docs/
-    │   ├── +server.ts                      # GET 列表 / POST 创建
-    │   └── [section]/[doc]/
+    │   ├── +server.ts                      # GET 列出文档树 / POST 创建
+    │   └── [...path]/
     │       ├── +server.ts                  # GET 读取 / PUT 更新 / DELETE 删除
-    │       └── comments/+server.ts         # GET 列表 / POST 添加
+    │       └── comments/+server.ts         # GET 列出评论 / POST 添加评论
     ├── search/+server.ts                   # GET 搜索
-    ├── auth/+server.ts                     # GET 当前用户信息
     └── repo/
         ├── sync/+server.ts                 # POST 强制同步
         └── status/+server.ts              # GET 缓存状态
@@ -222,7 +198,7 @@ src/lib/server/
 ├── auth/
 │   ├── github.ts           # GitHub OAuth
 │   ├── session.ts          # JWT session
-│   └── permissions.ts      # 权限检查
+│   └── permissions.ts      # 权限检查（基于 Git 仓库权限）
 ├── docs/
 │   ├── reader.ts           # 文档读取
 │   ├── writer.ts           # 文档写入
@@ -264,6 +240,7 @@ async function pushToRemote(dir: string, token: string): Promise<void>;
 interface CacheManager {
 	/**
 	 * 获取仓库的本地缓存路径
+	 * - 先用 token 校验用户对仓库的访问权限
 	 * - 不存在则 clone
 	 * - 已存在但过期则 pull
 	 * - 返回缓存目录路径并加写锁
@@ -272,6 +249,13 @@ interface CacheManager {
 
 	/** 强制清除缓存，下次 acquire 时重新 clone */
 	invalidate(repoUrl: string): void;
+
+	/**
+	 * 检查用户对仓库的权限级别
+	 * 通过 GitHub API 使用用户 token 查询仓库权限
+	 * 返回 'read' | 'write' | 'admin' | null
+	 */
+	checkPermission(repoUrl: string, token: string): Promise<'read' | 'write' | 'admin' | null>;
 }
 ```
 
@@ -301,8 +285,7 @@ interface SessionPayload {
 	provider: 'github';
 	username: string;
 	avatar: string;
-	permissions: string[];
-	ghToken: string; // GitHub access token，用于 git push
+	ghToken: string; // GitHub access token，用于 git 操作和权限校验
 }
 
 /** 创建 JWT 并设置 HttpOnly cookie */
@@ -317,28 +300,48 @@ function destroySession(cookies: Cookies): void;
 
 ### 5.5 auth/permissions.ts — 权限检查
 
-```typescript
-/** 从仓库中读取用户权限信息 */
-async function getUserPermissions(cacheDir: string, provider: string, userId: string): Promise<UserInfo | null>;
+权限完全依赖用户对 Git 仓库的实际权限，不再在仓库中存储用户信息文件。
 
-/** 检查用户是否具有指定权限 */
-function hasPermission(user: SessionPayload, required: string): boolean;
+```typescript
+/**
+ * 通过 GitHub API 检查用户对仓库的权限
+ * 使用用户的 GitHub token 调用 repos API 获取 permission 级别
+ * - read 权限 → 可浏览文档
+ * - write 权限 → 可编辑文档、发表评论
+ */
+async function checkRepoPermission(repoUrl: string, token: string): Promise<'read' | 'write' | 'admin' | null>;
+
+/** 检查用户是否具有指定权限级别 */
+function hasPermission(userPermission: 'read' | 'write' | 'admin', required: 'read' | 'write' | 'admin'): boolean;
 ```
 
 ### 5.6 docs/reader.ts — 文档读取
 
 ```typescript
-/** 获取所有章节列表 */
-async function listSections(cacheDir: string): Promise<string[]>;
+/** 获取文档目录树（递归扫描含 page.md 的路径） */
+async function listDocTree(cacheDir: string): Promise<DocTreeNode[]>;
 
-/** 获取章节下的文档列表 */
-async function listDocs(cacheDir: string, section: string): Promise<DocMeta[]>;
+interface DocTreeNode {
+	path: string; // 相对于 doc/ 的路径，如 "guide/setup"
+	title: string; // 来自 page.md frontmatter
+	hasPage: boolean; // 是否有 page.md
+	children: DocTreeNode[];
+}
 
 /** 读取文档内容（解析 frontmatter） */
-async function readDoc(cacheDir: string, section: string, doc: string): Promise<DocContent>;
+async function readDoc(cacheDir: string, path: string): Promise<DocContent>;
 
-/** 读取文档的所有评论 */
-async function readComments(cacheDir: string, section: string, doc: string): Promise<Comment[]>;
+/** 读取文档的所有评论（包含行评论） */
+async function readComments(cacheDir: string, path: string): Promise<Comment[]>;
+
+interface Comment {
+	id: string; // 文件名（不含 .md）
+	author: string; // 如 "github:67890"
+	createdAt: string;
+	replyTo?: string; // 回复目标评论的 id
+	line?: number; // 关联行号（行评论）
+	content: string;
+}
 ```
 
 ### 5.7 docs/writer.ts — 文档写入
@@ -347,22 +350,21 @@ async function readComments(cacheDir: string, section: string, doc: string): Pro
 /** 创建或更新文档 */
 async function writeDoc(
 	cacheDir: string,
-	section: string,
-	doc: string,
+	path: string,
 	content: string,
 	author: SessionPayload,
 	token: string,
 ): Promise<string>; // commit SHA
 
-/** 添加评论 */
+/** 添加评论（支持行评论） */
 async function addComment(
 	cacheDir: string,
-	section: string,
-	doc: string,
+	path: string,
 	content: string,
 	author: SessionPayload,
 	token: string,
 	replyTo?: string,
+	line?: number,
 ): Promise<string>; // commit SHA
 ```
 
@@ -370,8 +372,7 @@ async function addComment(
 
 ```typescript
 interface SearchResult {
-	section: string;
-	doc: string;
+	path: string;
 	title: string;
 	excerpt: string; // 匹配上下文
 	score: number;
@@ -404,14 +405,13 @@ GET /auth/callback/github?code=...&state=...
   │ 1. 验证 state 与 cookie 中的一致
   │ 2. POST github.com/login/oauth/access_token 换取 access_token
   │ 3. GET api.github.com/user 获取用户信息 (id, login, avatar_url)
-  │ 4. 在仓库缓存中查找 /auth/github/{id}/info.json
-  │    ├── 存在 → 读取权限，创建 JWT session cookie
-  │    │         重定向到 /doc
-  │    └── 不存在 → 返回 403（邀请制，需管理员添加）
+  │ 4. 创建 JWT session cookie（包含 userId, username, avatar, ghToken）
+  │ 5. 重定向到 /doc（或 /setup，如未配置仓库）
   │
   ▼
 后续请求:
   hooks.server.ts → 读取 cookie → 验证 JWT → 设置 event.locals.user
+  各页面/API 在需要时通过 checkRepoPermission() 校验用户对当前仓库的权限
 ```
 
 ### hooks.server.ts 中间件
@@ -438,7 +438,6 @@ declare global {
 				provider: 'github';
 				username: string;
 				avatar: string;
-				permissions: string[];
 				ghToken: string;
 			};
 		}
@@ -454,21 +453,22 @@ declare global {
 用户在编辑器中修改文档内容，点击保存
   │
   ▼
-POST /doc/[section]/[doc]/edit (SvelteKit form action)
+POST /doc/[...path]/edit (SvelteKit form action)
   │ body: { content: "新的 Markdown 内容..." }
   │
   ▼
 +page.server.ts → actions.default:
-  │ 1. 检查 event.locals.user 是否存在且有 'write' 权限
-  │ 2. cacheManager.acquire(repoUrl, user.ghToken)
-  │ 3. pullLatest() — 确保本地是最新
-  │ 4. 更新 page.md 的 frontmatter (updatedAt) 和正文
-  │ 5. writeFileAndCommit()
+  │ 1. 检查 event.locals.user 是否存在
+  │ 2. checkRepoPermission() 确认用户有 write 权限
+  │ 3. cacheManager.acquire(repoUrl, user.ghToken)
+  │ 4. pullLatest() — 确保本地是最新
+  │ 5. 更新 page.md 的 frontmatter (updatedAt) 和正文
+  │ 6. writeFileAndCommit()
   │    author: { name: user.username, email: "github:id@gitdoc" }
-  │    message: "编辑: [section]/[doc] by @username"
-  │ 6. pushToRemote()
-  │ 7. release() — 释放写锁
-  │ 8. 重定向回文档查看页
+  │    message: "编辑: [...path] by @username"
+  │ 7. pushToRemote()
+  │ 8. release() — 释放写锁
+  │ 9. 重定向回文档查看页
 ```
 
 ---
@@ -476,28 +476,30 @@ POST /doc/[section]/[doc]/edit (SvelteKit form action)
 ## 8. 数据流：添加评论
 
 ```
-用户在评论框输入内容，点击提交
+用户在评论框输入内容，点击提交（可选择行评论）
   │
   ▼
-POST /doc/[section]/[doc]/comment
-  │ body: { content: "评论内容", replyTo?: "comment-xxx" }
+POST /doc/[...path]/comment
+  │ body: { content: "评论内容", replyTo?: "1718438400000-abc123", line?: 15 }
   │
   ▼
 +server.ts:
-  │ 1. 检查 'comment' 权限
-  │ 2. cacheManager.acquire()
-  │ 3. pullLatest()
-  │ 4. 生成文件名: comment-{Date.now()}-{userId}.md
-  │ 5. 写入文件:
+  │ 1. 检查用户已登录
+  │ 2. checkRepoPermission() 确认用户有 write 权限
+  │ 3. cacheManager.acquire()
+  │ 4. pullLatest()
+  │ 5. 生成文件名: {Date.now()}-{nanoid()}.md
+  │ 6. 写入文件到 doc/[...path]/.comment/ 目录:
   │    ---
   │    author: github:67890
   │    createdAt: 2025-06-15T11:00:00Z
-  │    replyTo: comment-xxx  (如有)
+  │    replyTo: 1718438400000-abc123  (如有)
+  │    line: 15  (如有，行评论)
   │    ---
   │    评论内容...
-  │ 6. commit: "评论: [section]/[doc] by @username"
-  │ 7. push → release
-  │ 8. 返回 201 + 评论数据
+  │ 7. commit: "评论: [...path] by @username"
+  │ 8. push → release
+  │ 9. 返回 201 + 评论数据
 ```
 
 ---
@@ -509,29 +511,25 @@ POST /doc/[section]/[doc]/comment
 ### 认证方式
 
 ```
-Authorization: Bearer <token>
+Authorization: Bearer <github-access-token>
 ```
 
-token 可以是：
-
-- 用户的 GitHub access token
-- `config.json` 中配置的 API key
+所有 API 访问统一使用 GitHub access token，不设置独立的 API key（sk-xxxx）机制。服务器通过 token 验证用户身份和对仓库的权限。
 
 ### 端点列表
 
-| 方法   | 路径                                    | 说明               |
-| ------ | --------------------------------------- | ------------------ |
-| GET    | `/api/v1/docs`                          | 列出所有章节和文档 |
-| POST   | `/api/v1/docs`                          | 创建新文档         |
-| GET    | `/api/v1/docs/[section]/[doc]`          | 读取文档内容       |
-| PUT    | `/api/v1/docs/[section]/[doc]`          | 更新文档           |
-| DELETE | `/api/v1/docs/[section]/[doc]`          | 删除文档           |
-| GET    | `/api/v1/docs/[section]/[doc]/comments` | 列出评论           |
-| POST   | `/api/v1/docs/[section]/[doc]/comments` | 添加评论           |
-| GET    | `/api/v1/search?q=keyword`              | 搜索文档           |
-| GET    | `/api/v1/auth`                          | 当前用户信息       |
-| POST   | `/api/v1/repo/sync`                     | 强制从远程同步     |
-| GET    | `/api/v1/repo/status`                   | 缓存状态           |
+| 方法   | 路径                              | 说明           |
+| ------ | --------------------------------- | -------------- |
+| GET    | `/api/v1/docs`                    | 列出文档目录树 |
+| POST   | `/api/v1/docs`                    | 创建新文档     |
+| GET    | `/api/v1/docs/[...path]`          | 读取文档内容   |
+| PUT    | `/api/v1/docs/[...path]`          | 更新文档       |
+| DELETE | `/api/v1/docs/[...path]`          | 删除文档       |
+| GET    | `/api/v1/docs/[...path]/comments` | 列出评论       |
+| POST   | `/api/v1/docs/[...path]/comments` | 添加评论       |
+| GET    | `/api/v1/search?q=keyword`        | 搜索文档       |
+| POST   | `/api/v1/repo/sync`               | 强制从远程同步 |
+| GET    | `/api/v1/repo/status`             | 缓存状态       |
 
 ### 请求/响应示例
 
@@ -540,19 +538,21 @@ token 可以是：
 ```json
 // Response 200
 {
-	"sections": [
+	"tree": [
 		{
-			"name": "getting-started",
-			"docs": [
-				{ "name": "introduction", "title": "简介", "updatedAt": "2025-06-15T10:30:00Z" },
-				{ "name": "installation", "title": "安装指南", "updatedAt": "2025-06-14T08:00:00Z" }
+			"path": "getting-started",
+			"title": "快速入门",
+			"hasPage": true,
+			"children": [
+				{ "path": "getting-started/installation", "title": "安装指南", "hasPage": true, "children": [] },
+				{ "path": "getting-started/configuration", "title": "配置说明", "hasPage": true, "children": [] }
 			]
 		}
 	]
 }
 ```
 
-#### PUT /api/v1/docs/[section]/[doc]
+#### PUT /api/v1/docs/[...path]
 
 ```json
 // Request
@@ -562,17 +562,18 @@ token 可以是：
 { "commitSha": "abc123...", "updatedAt": "2025-06-15T12:00:00Z" }
 ```
 
-#### POST /api/v1/docs/[section]/[doc]/comments
+#### POST /api/v1/docs/[...path]/comments
 
 ```json
 // Request
-{ "content": "这里有个 typo", "replyTo": "comment-1718438400000-12345" }
+{ "content": "这里有个 typo", "replyTo": "1718438400000-abc123", "line": 15 }
 
 // Response 201
 {
-  "id": "comment-1718442000000-67890",
+  "id": "1718442000000-def456",
   "author": "zhangsan",
   "createdAt": "2025-06-15T12:00:00Z",
+  "line": 15,
   "commitSha": "def456..."
 }
 ```
@@ -610,15 +611,16 @@ token 可以是：
 src/lib/components/
 ├── layout/
 │   ├── Navbar.svelte              # 顶部导航：Logo、搜索入口、用户头像/登录
-│   └── Sidebar.svelte             # 侧边栏：文档目录树，可折叠章节
+│   └── Sidebar.svelte             # 侧边栏：文档目录树，可折叠层级
 ├── doc/
 │   ├── DocViewer.svelte           # Markdown 渲染（使用 mdsvex）
 │   ├── DocEditor.svelte           # Markdown 编辑器（textarea + 实时预览）
 │   ├── DocMeta.svelte             # 文档元信息：作者、更新时间
-│   └── DocList.svelte             # 文档列表卡片
+│   └── DocList.svelte             # 文档列表卡片（含子目录）
 ├── comment/
 │   ├── CommentList.svelte         # 评论列表（按时间排序，支持嵌套回复）
-│   └── CommentForm.svelte         # 评论输入框
+│   ├── CommentForm.svelte         # 评论输入框（支持行评论）
+│   └── LineCommentSidebar.svelte  # 行评论侧边栏（显示在文档右侧）
 ├── search/
 │   └── SearchBar.svelte           # 搜索输入 + 结果下拉
 └── auth/
@@ -636,7 +638,6 @@ workdir/caches/
 └── <sha256(repoUrl)>/             # 每个仓库一个目录
     ├── .git/                      # git 数据
     ├── doc/                       # 工作树
-    ├── auth/
     └── config.json
 ```
 

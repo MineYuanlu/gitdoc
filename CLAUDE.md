@@ -45,18 +45,17 @@ src/
 │   ├── setup/           # First-use repo configuration
 │   ├── doc/             # Document browsing, editing, commenting
 │   ├── search/          # Full-text search
-│   ├── admin/           # User management
 │   └── api/v1/          # REST API for LLM/Agent integration
 ├── lib/
 │   ├── server/          # Server-only modules (NEVER import from client code)
 │   │   ├── git/         # Git operations via isomorphic-git (clone, pull, commit, push)
-│   │   ├── auth/        # GitHub OAuth, JWT sessions, permission checks
+│   │   ├── auth/        # GitHub OAuth, JWT sessions, permission checks (repo-based)
 │   │   ├── docs/        # Document reading, writing, search
 │   │   └── config.ts    # Repo config.json management
 │   └── components/      # Shared Svelte components
 │       ├── layout/      # Navbar, Sidebar
 │       ├── doc/         # DocViewer, DocEditor, DocList
-│       ├── comment/     # CommentList, CommentForm
+│       ├── comment/     # CommentList, CommentForm, LineCommentSidebar
 │       ├── search/      # SearchBar
 │       └── auth/        # LoginButton
 ```
@@ -66,13 +65,13 @@ src/
 - **Svelte 5 Runes**: Always use `$state()`, `$derived()`, `$effect()`, `$props()` — never legacy `let` reactivity
 - **Server-only code**: All git operations, auth logic, and data access go in `$lib/server/`. SvelteKit enforces this boundary.
 - **Git operations**: Use `isomorphic-git` (pure JS, no system git binary). Never use `simple-git` or shell `git` commands.
-- **Auth**: GitHub OAuth with JWT session cookies. Check permissions via `event.locals.user` in server routes.
+- **Auth**: GitHub OAuth with JWT session cookies. Permissions are based on user's actual Git repo access (read/write), not stored in the repo.
 - **Data storage**: All data lives in the user's remote git repo, NOT in this codebase. This repo is the manager only.
-- **Commits**: Each edit or comment = exactly 1 git commit. Commit messages follow: `"编辑: [section]/[doc] by @username"` or `"评论: [section]/[doc] by @username"`.
+- **Commits**: Each edit or comment = exactly 1 git commit. Commit messages follow: `"编辑: [...path] by @username"` or `"评论: [...path] by @username"`.
 
 ### Route Naming
 
-- Pages: `src/routes/doc/[section]/[doc]/+page.svelte`
+- Pages: `src/routes/doc/[...path]/+page.svelte`
 - Server loaders: `+page.server.ts` (for page data) or `+server.ts` (for API endpoints)
 - API routes: `src/routes/api/v1/...` — RESTful, JSON responses
 
